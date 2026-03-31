@@ -1,81 +1,98 @@
 """
-Basic usage example for boostwatch library.
-This replicates the functionality from exploration.ipynb using the boostwatch package.
+Basic usage examples for boostwatch.
+
+Demonstrates the watch() API with:
+  1. LightGBM (callbacks pattern)
+  2. sklearn GradientBoostingClassifier (fit() pattern)
 """
 
 import numpy as np
 import pandas as pd
-import lightgbm as lgb
-import matplotlib.pyplot as plt
 
 from sklearn.datasets import load_iris
+from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import log_loss, accuracy_score
 
-# Import boostwatch components
-from boostwatch import GBDTObserver, compute_feature_stats
-from boostwatch.viz.plotting import (
-    plot_splits_per_iteration,
-    plot_feature_usage_over_time,
-    plot_feature_stats,
-    plot_confidence_distribution,
-    plot_confidence_vs_errors
-)
+from boostwatch import watch
+from boostwatch.viz.plotting import plot_confidence_distribution, plot_confidence_vs_errors
 
-# Load dataset
+# ---------------------------------------------------------------------------
+# Shared dataset
+# ---------------------------------------------------------------------------
 data = load_iris()
 X = pd.DataFrame(data.data, columns=data.feature_names)
 y = data.target
+feature_names = list(X.columns)
 
-print("Dataset loaded:")
-print(f"Features: {list(X.columns)}")
-print(f"Classes: {list(data.target_names)}")
-
-# Train/test split
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2, random_state=42, stratify=y
 )
 
-print(f"\nTrain shape: {X_train.shape}")
-print(f"Test shape: {X_test.shape}")
+print("Dataset: Iris ({} train, {} test)".format(len(X_train), len(X_test)))
+print("Features:", feature_names)
 
-# Create observer and train model
-observer = GBDTObserver()
 
-model = lgb.LGBMClassifier(
-    n_estimators=30,
-    learning_rate=0.1,
-    max_depth=-1
-)
+# ---------------------------------------------------------------------------
+# Example 1 — LightGBM
+# ---------------------------------------------------------------------------
+def example_lightgbm():
+    try:
+        import lightgbm as lgb
+    except ImportError:
+        print("\n[skip] LightGBM not installed. Run: pip install boostwatch[lightgbm]")
+        return
 
-model.fit(
-    X_train,
-    y_train,
-    eval_set=[(X_test, y_test)],
-    eval_metric="multi_logloss",
-    callbacks=[observer.callback()]
-)
+    print("\n=== LightGBM example ===")
 
-# Compute feature statistics
-stats = compute_feature_stats(observer.get_logs(), X.columns)
+    model = lgb.LGBMClassifier(n_estimators=30, learning_rate=0.1, verbose=-1)
+    observer = watch(model, feature_names=feature_names)
 
-# Generate visualizations
-print("\nGenerating visualizations...")
-plot_splits_per_iteration(observer.get_logs())
-plot_feature_stats(stats, X.columns)
-plot_feature_usage_over_time(observer.get_logs(), X.columns)
+    model.fit(
+        X_train, y_train,
+        eval_set=[(X_test, y_test)],
+        eval_metric="multi_logloss",
+        callbacks=observer.callbacks(),
+    )
 
-# Model evaluation
-probs = model.predict_proba(X_test)
-preds = np.argmax(probs, axis=1)
+    print("Logged {} iterations".format(len(observer.get_logs())))
+    observer.plot_summary()
 
-print(f"\nAccuracy: {accuracy_score(y_test, preds):.4f}")
+    probs = model.predict_proba(X_test)
+    preds = np.argmax(probs, axis=1)
+    print("Accuracy: {:.4f}".format(accuracy_score(y_test, preds)))
 
-# Confidence analysis
-confidence = np.max(probs, axis=1)
-errors = preds != y_test
+    confidence = np.max(probs, axis=1)
+    errors = preds != y_test
+    plot_confidence_distribution(confidence)
+    plot_confidence_vs_errors(confidence, errors)
 
-plot_confidence_distribution(confidence)
-plot_confidence_vs_errors(confidence, errors)
 
-print("\nAnalysis complete!")
+# ---------------------------------------------------------------------------
+# Example 2 — sklearn GradientBoostingClassifier
+# ---------------------------------------------------------------------------
+def example_sklearn():
+    from sklearn.ensemble import GradientBoostingClassifier
+
+    print("\n=== sklearn GradientBoostingClassifier example ===")
+
+    model = GradientBoostingClassifier(n_estimators=30, learning_rate=0.1, random_state=42)
+    observer = watch(model, feature_names=feature_names)
+
+    # observer.fit() trains the model internally using warm_start
+    observer.fit(X_train, y_train)
+
+    print("Logged {} iterations".format(len(observer.get_logs())))
+    observer.plot_summary()
+
+    probs = observer.model.predict_proba(X_test)
+    preds = np.argmax(probs, axis=1)
+    print("Accuracy: {:.4f}".format(accuracy_score(y_test, preds)))
+
+
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    example_lightgbm()
+    example_sklearn()
+    print("\nDone.")
