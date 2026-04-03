@@ -61,12 +61,23 @@ class _XGBoostCallback:
 
     def after_iteration(self, model: Any, epoch: int, evals_log: Dict) -> bool:
         """Called by XGBoost after each boosting round."""
-        dump = model.get_dump(dump_format="json")
+        # get_dump() returns ALL trees accumulated so far.
+        # For multi-class with k classes there are k trees per round.
+        # Extract only the trees belonging to the current round.
+        # with_stats=True adds gain and cover fields to each node (required since XGBoost 3.x
+        # which no longer includes them by default).
+        dump = model.get_dump(dump_format="json", with_stats=True)
+        total = len(dump)
+        rounds_done = epoch + 1          # epoch is 0-indexed
+        trees_per_round = total // rounds_done
+        round_dump = dump[epoch * trees_per_round : (epoch + 1) * trees_per_round]
+
+        feature_names = self._observer.feature_names
 
         trees: List[TreeLog] = []
-        for idx, tree_json in enumerate(dump):
+        for idx, tree_json in enumerate(round_dump):
             node = json.loads(tree_json)
-            splits, leaves = parse_xgb_tree_json(node)
+            splits, leaves = parse_xgb_tree_json(node, feature_names=feature_names)
             trees.append(TreeLog(
                 tree_index=idx,
                 num_leaves=len(leaves),

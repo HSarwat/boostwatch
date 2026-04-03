@@ -63,32 +63,55 @@ def traverse_lgb_tree(
 # XGBoost
 # ---------------------------------------------------------------------------
 
-def parse_xgb_tree_json(node: dict) -> Tuple[List[SplitInfo], List[LeafInfo]]:
+def parse_xgb_tree_json(
+    node: dict,
+    feature_names: Optional[List[str]] = None,
+) -> Tuple[List[SplitInfo], List[LeafInfo]]:
     """Parse an XGBoost tree from get_dump(dump_format='json').
 
     XGBoost node fields for split nodes: nodeid, depth, split, split_condition,
     gain, cover, children.
     XGBoost node fields for leaf nodes: nodeid, leaf.
 
+    The ``split`` field is either ``"f<index>"`` (when trained on numpy arrays)
+    or the actual feature name string (when trained on a pandas DataFrame).
+    Passing ``feature_names`` enables correct index resolution in the latter case.
+
     Args:
         node: Root node dict parsed from XGBoost JSON dump
+        feature_names: Optional ordered list of feature names used during
+            training.  Required to map named features to their integer index.
 
     Returns:
         Tuple of (splits, leaves) lists
     """
+    name_to_idx: dict = (
+        {name: idx for idx, name in enumerate(feature_names)}
+        if feature_names else {}
+    )
+
     splits: List[SplitInfo] = []
     leaves: List[LeafInfo] = []
 
     def _traverse(n: dict) -> None:
         if "children" in n:
-            # Split node — feature is stored as "f0", "f1", or a name string
+            # Split field is "f<index>" for numpy input or a column name for DataFrame input
             feature_str = n.get("split", "")
-            try:
-                feature_index = int(feature_str.lstrip("f"))
-                feature_name = None
-            except (ValueError, AttributeError):
-                feature_index = -1
-                feature_name = feature_str
+            if feature_str in name_to_idx:
+                # Named feature from DataFrame training
+                feature_index = name_to_idx[feature_str]
+                feature_name: Optional[str] = feature_str
+            else:
+                try:
+                    feature_index = int(feature_str.lstrip("f"))
+                    feature_name = (
+                        feature_names[feature_index]
+                        if feature_names and feature_index < len(feature_names)
+                        else None
+                    )
+                except (ValueError, AttributeError):
+                    feature_index = -1
+                    feature_name = feature_str or None
 
             splits.append(SplitInfo(
                 feature_index=feature_index,
@@ -100,7 +123,9 @@ def parse_xgb_tree_json(node: dict) -> Tuple[List[SplitInfo], List[LeafInfo]]:
             for child in n["children"]:
                 _traverse(child)
         else:
-            # Leaf node
+            # Leaf node.  cover = sum of Hessians of samples at this leaf.
+            # Equals sample count only for squared-error loss (Hessian=1 per sample);
+            # for other objectives (logistic, Poisson, etc.) it is not an integer count.
             leaves.append(LeafInfo(
                 leaf_index=int(n.get("nodeid", 0)),
                 leaf_value=float(n.get("leaf", 0.0)),
