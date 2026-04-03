@@ -38,6 +38,80 @@ def _split_gain(split: Any) -> float:
     return float(split.get("gain", 0.0))
 
 
+def _get_framework(logs: List[Any]) -> Optional[str]:
+    """Return the framework name from the first log entry, or None."""
+    if logs and hasattr(logs[0], "framework"):
+        return logs[0].framework
+    return None
+
+
+def _all_equal(values: list) -> bool:
+    """Return True if *values* is non-empty and every element is the same."""
+    if not values:
+        return False
+    return len(set(round(v) for v in values)) == 1
+
+
+def _note_axis(ax: Any, title: str, body: str) -> None:
+    """Render a muted informational note on a turned-off axes panel."""
+    ax.set_title(title, fontsize=10)
+    ax.axis("off")
+    ax.text(
+        0.5, 0.5, body,
+        transform=ax.transAxes,
+        ha="center", va="center",
+        fontsize=9,
+        color="#555555",
+        bbox=dict(boxstyle="round,pad=0.7", facecolor="#f7f7f7", edgecolor="#cccccc"),
+    )
+
+
+def _constant_note(framework: Optional[str], prop: str, value: int, n_iters: int) -> str:
+    """Return a human-readable note for a metric that is constant across all iterations."""
+    if prop == "splits":
+        if framework == "catboost":
+            return (
+                "CatBoost uses symmetric (oblivious) trees — one split condition per depth level.\n\n"
+                "Each tree has a fixed {} split(s) per tree,\n"
+                "constant across all {} iterations.".format(value, n_iters)
+            )
+        return "Split count is constant at {} across all {} iterations.".format(value, n_iters)
+
+    if prop == "depth":
+        if framework == "catboost":
+            return (
+                "CatBoost uses symmetric (oblivious) trees.\n\n"
+                "Depth is a hyperparameter — all {} trees share\na fixed depth of {}.".format(
+                    n_iters, value)
+            )
+        if framework == "xgboost":
+            return (
+                "All XGBoost trees reached max_depth={}.\n\n"
+                "Depth is uniform across all {} iterations.".format(value, n_iters)
+            )
+        if framework == "sklearn":
+            return (
+                "All sklearn GBT trees grew to depth {} (max_depth).\n\n"
+                "Depth is uniform across all {} iterations.".format(value, n_iters)
+            )
+        return "Tree depth is constant at {} across all {} iterations.".format(value, n_iters)
+
+    if prop == "leaves":
+        if framework == "catboost":
+            return (
+                "CatBoost symmetric trees always have 2^depth leaves.\n\n"
+                "All {} trees have exactly {} leaves.".format(n_iters, value)
+            )
+        if framework == "lightgbm":
+            return (
+                "All LightGBM trees grew to the maximum num_leaves={}.\n\n"
+                "Leaf count is uniform across all {} iterations.".format(value, n_iters)
+            )
+        return "Leaf count is constant at {} across all {} iterations.".format(value, n_iters)
+
+    return "This metric is constant ({}) across {} iterations.".format(value, n_iters)
+
+
 def _resolve_feature_names(logs: List[Any], feature_names: Optional[List[str]]) -> List[str]:
     """Try to determine feature names from logs if not supplied."""
     if feature_names:
@@ -63,16 +137,30 @@ def _resolve_feature_names(logs: List[Any], feature_names: Optional[List[str]]) 
 def plot_splits_per_iteration(logs: List[Any]) -> None:
     """Plot the total number of splits per boosting iteration.
 
+    If split count is identical across all iterations (e.g. CatBoost oblivious
+    trees, or any framework whose trees consistently hit their structural limit),
+    an informational note is shown instead of a flat, uninformative line chart.
+
     Args:
         logs: List of ``IterationLog`` objects or legacy dicts.
     """
     iterations = []
     split_counts = []
-
     for log in logs:
         iteration, splits = _iter_log(log)
         iterations.append(iteration)
         split_counts.append(len(splits))
+
+    if _all_equal(split_counts):
+        _, ax = plt.subplots(figsize=(8, 3))
+        _note_axis(
+            ax,
+            "Splits per Iteration \u2014 Constant",
+            _constant_note(_get_framework(logs), "splits", split_counts[0], len(logs)),
+        )
+        plt.tight_layout()
+        plt.show()
+        return
 
     plt.figure(figsize=(10, 6))
     plt.plot(iterations, split_counts, marker="o")
@@ -141,7 +229,7 @@ def plot_feature_stats(stats: Dict[int, Dict], feature_names: Optional[List[str]
         gains.append(s["total_gain"])
         avg_gains.append(s["avg_gain"])
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    _, axes = plt.subplots(1, 3, figsize=(18, 5))
 
     axes[0].barh(names, counts)
     axes[0].set_title("Split Frequency")
@@ -201,6 +289,11 @@ def plot_confidence_vs_errors(confidence: np.ndarray, errors: np.ndarray) -> Non
 def plot_tree_complexity(logs: List[Any]) -> None:
     """Plot average tree depth and leaf count over boosting iterations.
 
+    If depth or leaf count is identical across all iterations (e.g. CatBoost
+    oblivious trees, LightGBM trees consistently filling num_leaves, XGBoost/
+    sklearn trees consistently hitting max_depth), an informational note is
+    shown for that panel instead of a flat, uninformative line chart.
+
     Args:
         logs: List of :class:`~boostwatch.core.log_schema.IterationLog` objects.
     """
@@ -211,19 +304,33 @@ def plot_tree_complexity(logs: List[Any]) -> None:
         print("No tree structure data available in logs.")
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    framework = _get_framework(logs)
+    n_iters = len(logs)
+    _, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    axes[0].plot(stats["iterations"], stats["avg_depth"], marker="o", color="steelblue")
-    axes[0].set_title("Average Tree Depth per Iteration")
-    axes[0].set_xlabel("Iteration")
-    axes[0].set_ylabel("Avg Depth")
-    axes[0].grid(True, alpha=0.3)
+    # Depth panel
+    if _all_equal(stats["avg_depth"]):
+        value = round(stats["avg_depth"][0])
+        _note_axis(axes[0], "Tree Depth \u2014 Constant",
+                   _constant_note(framework, "depth", value, n_iters))
+    else:
+        axes[0].plot(stats["iterations"], stats["avg_depth"], marker="o", color="steelblue")
+        axes[0].set_title("Average Tree Depth per Iteration")
+        axes[0].set_xlabel("Iteration")
+        axes[0].set_ylabel("Avg Depth")
+        axes[0].grid(True, alpha=0.3)
 
-    axes[1].plot(stats["iterations"], stats["avg_leaves"], marker="o", color="darkorange")
-    axes[1].set_title("Average Leaf Count per Iteration")
-    axes[1].set_xlabel("Iteration")
-    axes[1].set_ylabel("Avg Leaves")
-    axes[1].grid(True, alpha=0.3)
+    # Leaf count panel
+    if _all_equal(stats["avg_leaves"]):
+        value = round(stats["avg_leaves"][0])
+        _note_axis(axes[1], "Leaf Count \u2014 Constant",
+                   _constant_note(framework, "leaves", value, n_iters))
+    else:
+        axes[1].plot(stats["iterations"], stats["avg_leaves"], marker="o", color="darkorange")
+        axes[1].set_title("Average Leaf Count per Iteration")
+        axes[1].set_xlabel("Iteration")
+        axes[1].set_ylabel("Avg Leaves")
+        axes[1].grid(True, alpha=0.3)
 
     plt.tight_layout()
     plt.show()
@@ -238,6 +345,9 @@ def plot_summary(logs: List[Any], feature_names: Optional[List[str]] = None) -> 
     - Feature split frequency (top features)
     - Eval metrics over time (if logged)
 
+    For any panel where the metric is constant across all iterations, an
+    informational note is shown instead of a flat, uninformative line chart.
+
     Args:
         logs: List of :class:`~boostwatch.core.log_schema.IterationLog` objects
             or legacy dicts.
@@ -249,6 +359,16 @@ def plot_summary(logs: List[Any], feature_names: Optional[List[str]] = None) -> 
     names = _resolve_feature_names(logs, feature_names)
     stats = compute_feature_stats(logs, names or None)
     tree_stats = compute_tree_stats(logs)
+    framework = _get_framework(logs)
+    n_iters = len(logs)
+
+    # Pre-compute split counts so we can detect constancy before drawing
+    iterations = []
+    split_counts = []
+    for log in logs:
+        it, splits = _iter_log(log)
+        iterations.append(it)
+        split_counts.append(len(splits))
 
     # Determine how many metric series we have
     metric_names: List[str] = []
@@ -263,22 +383,23 @@ def plot_summary(logs: List[Any], feature_names: Optional[List[str]] = None) -> 
     panel = 0
 
     # Panel 1: splits per iteration
-    iterations = []
-    split_counts = []
-    for log in logs:
-        it, splits = _iter_log(log)
-        iterations.append(it)
-        split_counts.append(len(splits))
-
-    axes[panel].plot(iterations, split_counts, marker="o", color="steelblue")
-    axes[panel].set_title("Splits per Iteration")
-    axes[panel].set_xlabel("Iteration")
-    axes[panel].set_ylabel("Splits")
-    axes[panel].grid(True, alpha=0.3)
+    if _all_equal(split_counts):
+        _note_axis(axes[panel], "Splits per Iteration \u2014 Constant",
+                   _constant_note(framework, "splits", split_counts[0], n_iters))
+    else:
+        axes[panel].plot(iterations, split_counts, marker="o", color="steelblue")
+        axes[panel].set_title("Splits per Iteration")
+        axes[panel].set_xlabel("Iteration")
+        axes[panel].set_ylabel("Splits")
+        axes[panel].grid(True, alpha=0.3)
     panel += 1
 
     # Panel 2: avg tree depth
-    if tree_stats["iterations"]:
+    if tree_stats["iterations"] and _all_equal(tree_stats["avg_depth"]):
+        value = round(tree_stats["avg_depth"][0])
+        _note_axis(axes[panel], "Tree Depth \u2014 Constant",
+                   _constant_note(framework, "depth", value, n_iters))
+    elif tree_stats["iterations"]:
         axes[panel].plot(tree_stats["iterations"], tree_stats["avg_depth"],
                          marker="o", color="darkorange")
         axes[panel].set_title("Avg Tree Depth")
