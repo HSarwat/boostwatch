@@ -18,12 +18,14 @@ def _iter_log(log: Any):
 
 
 def _split_feature(split: Any) -> int:
+    """Return the feature index from a SplitInfo dataclass or legacy dict."""
     if hasattr(split, "feature_index"):
         return split.feature_index
-    return split["feature"]
+    return int(split["feature"])
 
 
 def _split_gain(split: Any) -> float:
+    """Return the gain value from a SplitInfo dataclass or legacy dict."""
     if hasattr(split, "gain"):
         return float(split.gain)
     return float(split.get("gain", 0.0))
@@ -40,7 +42,7 @@ def _all_equal(values: list) -> bool:
     """Return True if values is non-empty and every element is the same."""
     if not values:
         return False
-    return len(set(round(v) for v in values)) == 1
+    return max(values) - min(values) < 0.5
 
 
 def _note_axis(ax: Any, title: str, body: str) -> None:
