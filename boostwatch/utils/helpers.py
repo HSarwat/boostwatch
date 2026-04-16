@@ -177,11 +177,22 @@ def parse_sklearn_tree(
                 if feature_names and feat_idx < len(feature_names)
                 else None
             )
+            # Weighted impurity reduction: the actual gain from this split.
+            # This is proportional to sklearn's feature_importances_ and gives
+            # correct relative rankings across features.
+            # Using raw tree_.impurity[node_id] would give node impurity, not
+            # the reduction, which produces wrong feature rankings.
+            n_node = tree_.n_node_samples[node_id]
+            n_left = tree_.n_node_samples[left]
+            n_right = tree_.n_node_samples[right]
+            gain = (n_node * tree_.impurity[node_id]
+                    - n_left * tree_.impurity[left]
+                    - n_right * tree_.impurity[right])
             splits.append(SplitInfo(
                 feature_index=feat_idx,
                 feature_name=feat_name,
                 threshold=float(tree_.threshold[node_id]),
-                gain=float(tree_.impurity[node_id]),
+                gain=float(gain),
                 depth=depth,
             ))
             _traverse(left, depth + 1)
@@ -196,7 +207,12 @@ def parse_sklearn_tree(
 # ---------------------------------------------------------------------------
 
 def compute_max_depth(splits: List[SplitInfo]) -> int:
-    """Return the maximum split depth from a list of SplitInfo objects."""
+    """Return the maximum tree depth (deepest leaf level) from a list of SplitInfo objects.
+
+    Split nodes are 0-indexed from the root, so the deepest leaf is one level
+    below the deepest split node.  Adding 1 gives the standard definition of
+    tree depth (number of edges from root to deepest leaf).
+    """
     if not splits:
         return 0
-    return max(s.depth for s in splits)
+    return max(s.depth for s in splits) + 1

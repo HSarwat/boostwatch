@@ -69,6 +69,8 @@ def _note_axis(ax: Any, title: str, body: str) -> None:
 def _constant_note(framework: Optional[str], prop: str, value: int, n_iters: int) -> str:
     """Return a human-readable note for a metric that is constant across all iterations."""
     if prop == "splits":
+        if value == 0:
+            return "No split data found in logs.\n\nTree structure may not be populated yet\n(e.g. call observer.finalize(model) for CatBoost)."
         if framework == "catboost":
             return (
                 "CatBoost uses symmetric (oblivious) trees — one split condition per depth level.\n\n"
@@ -445,4 +447,189 @@ def plot_summary(logs: List[Any], feature_names: Optional[List[str]] = None) -> 
 
     fig.suptitle("Boostwatch Training Summary", fontsize=14, fontweight="bold")
     plt.tight_layout()
+    plt.show()
+
+
+def plot_feature_heatmap(
+    logs: List[Any],
+    top_k: int = 15,
+    features: Optional[List] = None,
+    metric: str = "gain_share",
+    smoothing_window: int = 10,
+    cmap: str = "YlOrRd",
+    figsize: tuple = (14, 8),
+) -> None:
+    """Plot a feature \u00d7 iteration heatmap showing how feature usage evolves over training.
+
+    The top panel shows total gain per iteration (the learning curve) so you can
+    see when the model hits diminishing returns.  The heatmap below encodes how
+    each feature's contribution shifts across iterations, revealing:
+
+    - **Early-dominant features** (hot bands on the left) \u2014 the primary signal
+      drivers when the residuals are largest.
+    - **Late-rising features** (bands that intensify on the right) \u2014 features
+      the model leans on once the main signal is captured, which can indicate
+      overfitting to noise.
+
+    Args:
+        logs: List of :class:`~boostwatch.core.log_schema.IterationLog` objects.
+        top_k: Number of top features to display, ranked by total gain across all
+            iterations.  Ignored when *features* is provided.
+        features: Explicit list of feature indices (``int``) or feature names
+            (``str``) to display.  Overrides *top_k*.
+        metric: Metric encoded in each heatmap cell:
+
+            - ``"gain_share"`` *(default)* \u2014 each feature's fraction of the total
+              gain in that iteration.  Best for comparing early vs late importance
+              because it cancels the natural decline in absolute gain.
+            - ``"count"`` \u2014 raw split count per feature per iteration.
+            - ``"raw_gain"`` \u2014 total gain attributed to the feature per iteration.
+
+        smoothing_window: Rolling-window width applied to each feature's series
+            before rendering.  Set to ``1`` to disable.  Defaults to ``10``.
+        cmap: Matplotlib colormap name.  Defaults to ``"YlOrRd"``.
+        figsize: Figure ``(width, height)`` in inches.
+
+    Note:
+        For CatBoost, per-split gain is approximated as
+        ``global_importance / split_count`` (the best available proxy without
+        per-split loss-reduction data).  ``"count"`` is a more reliable metric
+        for CatBoost logs.
+    """
+    import pandas as pd
+    from matplotlib import gridspec
+
+    if not logs:
+        print("No logs to plot.")
+        return
+
+    n_iters = len(logs)
+
+    # --- Resolve feature name → index mapping from embedded SplitInfo data ----
+    names_map: Dict[int, str] = {}
+    for log in logs:
+        if hasattr(log, "trees"):
+            for tree in log.trees:
+                for split in tree.splits:
+                    if getattr(split, "feature_name", None):
+                        names_map[split.feature_index] = split.feature_name
+
+    # --- Accumulate total gain per feature for top-k selection ----------------
+    total_feat_gain: Dict[int, float] = {}
+    for log in logs:
+        _, splits = _iter_log(log)
+        for split in splits:
+            f = _split_feature(split)
+            g = _split_gain(split)
+            total_feat_gain[f] = total_feat_gain.get(f, 0.0) + g
+
+    if not total_feat_gain:
+        print("No split data in logs — tree structure may not be populated yet.")
+        return
+
+    # --- Resolve which features to show ---------------------------------------
+    name_to_idx: Dict[str, int] = {v: k for k, v in names_map.items()}
+
+    if features is not None:
+        if features and isinstance(features[0], str):
+            selected = [name_to_idx[f] for f in features if f in name_to_idx]
+        else:
+            selected = [int(f) for f in features]
+    else:
+        by_gain = sorted(total_feat_gain, key=lambda f: total_feat_gain[f], reverse=True)
+        selected = by_gain[:top_k]
+
+    if not selected:
+        print("No matching features found.")
+        return
+
+    n_selected = len(selected)
+    selected_set = set(selected)
+
+    # --- Build raw matrix (n_selected \u00d7 n_iters) and total-gain curve ----------
+    matrix = np.zeros((n_selected, n_iters))
+    total_gain_per_iter = np.zeros(n_iters)
+    iter_numbers: List[int] = []
+
+    for col, log in enumerate(logs):
+        it, splits = _iter_log(log)
+        iter_numbers.append(int(it))
+        feat_gain: Dict[int, float] = {}
+        feat_count: Dict[int, int] = {}
+        iter_total = 0.0
+        for split in splits:
+            f = _split_feature(split)
+            g = _split_gain(split)
+            iter_total += g
+            if f in selected_set:
+                feat_gain[f] = feat_gain.get(f, 0.0) + g
+                feat_count[f] = feat_count.get(f, 0) + 1
+        total_gain_per_iter[col] = iter_total
+
+        for row, f in enumerate(selected):
+            if metric == "gain_share":
+                matrix[row, col] = feat_gain.get(f, 0.0) / iter_total if iter_total > 0 else 0.0
+            elif metric == "count":
+                matrix[row, col] = float(feat_count.get(f, 0))
+            else:  # raw_gain
+                matrix[row, col] = feat_gain.get(f, 0.0)
+
+    # --- Apply rolling-window smoothing per feature row -----------------------
+    if smoothing_window > 1 and n_iters >= smoothing_window:
+        for row in range(n_selected):
+            matrix[row] = (
+                pd.Series(matrix[row])
+                .rolling(smoothing_window, min_periods=1, center=True)
+                .mean()
+                .to_numpy()
+            )
+
+    # --- Feature labels (y-axis) ----------------------------------------------
+    feat_labels = [names_map.get(f, "feat_{}".format(f)) for f in selected]
+
+    # --- Build x-axis ticks mapped to actual iteration numbers ----------------
+    tick_step = max(1, n_iters // 10)
+    tick_positions = list(range(0, n_iters, tick_step))
+    tick_labels = [str(iter_numbers[i]) for i in tick_positions]
+
+    # --- Plot -----------------------------------------------------------------
+    metric_labels = {
+        "gain_share": "Gain Share",
+        "count":      "Split Count",
+        "raw_gain":   "Total Gain",
+    }
+    metric_label = metric_labels.get(metric, metric)
+
+    fig = plt.figure(figsize=figsize, layout="constrained")
+    gs = gridspec.GridSpec(2, 1, height_ratios=[1, 5], hspace=0.06, figure=fig)
+    ax_curve = fig.add_subplot(gs[0])
+    ax_heat  = fig.add_subplot(gs[1])
+
+    # Learning curve (raw, unsmoothed — shows actual training dynamics)
+    ax_curve.fill_between(range(n_iters), total_gain_per_iter, alpha=0.25, color="steelblue")
+    ax_curve.plot(range(n_iters), total_gain_per_iter, color="steelblue", linewidth=1.2)
+    ax_curve.set_xlim(-0.5, n_iters - 0.5)
+    ax_curve.set_xticks([])
+    ax_curve.set_ylabel("Total\nGain", fontsize=8, labelpad=4)
+    ax_curve.tick_params(axis="y", labelsize=7)
+    ax_curve.grid(True, alpha=0.2)
+
+    # Heatmap
+    im = ax_heat.imshow(
+        matrix, aspect="auto", cmap=cmap,
+        interpolation="nearest", vmin=0,
+    )
+    ax_heat.set_yticks(range(n_selected))
+    ax_heat.set_yticklabels(feat_labels, fontsize=9)
+    ax_heat.set_xticks(tick_positions)
+    ax_heat.set_xticklabels(tick_labels, fontsize=8)
+    ax_heat.set_xlabel("Iteration", fontsize=10)
+
+    cbar = plt.colorbar(im, ax=ax_heat, shrink=0.7, pad=0.02)
+    cbar.set_label(metric_label, fontsize=9)
+
+    title = "Feature {} over Training".format(metric_label)
+    if smoothing_window > 1:
+        title += "  (smoothing={})".format(smoothing_window)
+    fig.suptitle(title, fontsize=12, fontweight="bold")
     plt.show()

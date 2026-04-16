@@ -208,3 +208,6 @@ __marimo__/
 
 # Claude Code
 .claude/
+
+# Developer debug / visualisation scripts (not for distribution)
+dev/
