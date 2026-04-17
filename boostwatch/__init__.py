@@ -16,6 +16,20 @@ from .viz.plotting import (
     plot_summary,
     plot_tree_complexity,
 )
+from .viz.charts import (
+    plot_learning_curve,
+    plot_leaf_distribution,
+    plot_split_depth_dist,
+    plot_feature_heatmap,
+)
+from .viz.data_export import (
+    get_feature_stats,
+    get_iteration_metrics,
+    get_tree_stats,
+    get_split_depth_distribution,
+    get_leaf_distribution,
+)
+from .viz.report import generate_report
 
 __version__ = "0.2.0"
 __author__ = "Boostwatch Contributors"
@@ -100,4 +114,17 @@ __all__ = [
     "plot_confidence_vs_errors",
     "plot_summary",
     "plot_tree_complexity",
+    # New chart functions
+    "plot_learning_curve",
+    "plot_leaf_distribution",
+    "plot_split_depth_dist",
+    "plot_feature_heatmap",
+    # Data export
+    "get_feature_stats",
+    "get_iteration_metrics",
+    "get_tree_stats",
+    "get_split_depth_distribution",
+    "get_leaf_distribution",
+    # Report
+    "generate_report",
 ]
