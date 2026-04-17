@@ -208,6 +208,9 @@ __marimo__/
 
 # Claude Code
 .claude/
+.claudeignore
+CLAUDE.md
+docs/superpowers/
 
 # Developer debug / visualisation scripts (not for distribution)
 dev/
