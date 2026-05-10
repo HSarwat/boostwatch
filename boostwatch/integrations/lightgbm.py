@@ -43,9 +43,14 @@ class LightGBMObserver(BaseObserver):
             num_class = dump.get("num_class", 1)
             round_trees = raw_tree_info[-(num_class):]
 
+            # LightGBM puts feature names at the top of dump_model(), not per-node.
+            # Prefer the user-supplied list (matches training column order); fall
+            # back to whatever LightGBM stored.
+            names = self.feature_names or dump.get("feature_names")
+
             trees: List[TreeLog] = []
             for idx, t in enumerate(round_trees):
-                splits, leaves = traverse_lgb_tree(t["tree_structure"])
+                splits, leaves = traverse_lgb_tree(t["tree_structure"], feature_names=names)
                 trees.append(TreeLog(
                     tree_index=idx,
                     num_leaves=t.get("num_leaves", len(leaves)),

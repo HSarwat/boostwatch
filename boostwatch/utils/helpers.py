@@ -15,6 +15,7 @@ def traverse_lgb_tree(
     node: dict,
     depth: int = 0,
     leaf_counter: Optional[List[int]] = None,
+    feature_names: Optional[List[str]] = None,
 ) -> Tuple[List[SplitInfo], List[LeafInfo]]:
     """Recursively traverse a LightGBM dump_model() tree node.
 
@@ -22,6 +23,10 @@ def traverse_lgb_tree(
         node: A node dict from LightGBM's dump_model()["tree_info"][i]["tree_structure"]
         depth: Current recursion depth (used to annotate split depth)
         leaf_counter: Mutable list with a single integer used to assign leaf indices
+        feature_names: Optional list of feature names indexed by feature column.
+            LightGBM's per-node dump does not include feature names — they live at
+            the top level of dump_model(). Pass them through to populate
+            ``SplitInfo.feature_name``.
 
     Returns:
         Tuple of (splits, leaves) lists
@@ -33,15 +38,23 @@ def traverse_lgb_tree(
     leaves: List[LeafInfo] = []
 
     if "split_feature" in node:
+        feat_idx = node["split_feature"]
+        feat_name = node.get("split_feature_name")
+        if not feat_name and feature_names and 0 <= feat_idx < len(feature_names):
+            feat_name = feature_names[feat_idx]
         splits.append(SplitInfo(
-            feature_index=node["split_feature"],
-            feature_name=node.get("split_feature_name"),
+            feature_index=feat_idx,
+            feature_name=feat_name,
             threshold=float(node.get("threshold", 0.0)),
             gain=float(node.get("split_gain", 0.0)),
             depth=depth,
         ))
-        left_splits, left_leaves = traverse_lgb_tree(node["left_child"], depth + 1, leaf_counter)
-        right_splits, right_leaves = traverse_lgb_tree(node["right_child"], depth + 1, leaf_counter)
+        left_splits, left_leaves = traverse_lgb_tree(
+            node["left_child"], depth + 1, leaf_counter, feature_names
+        )
+        right_splits, right_leaves = traverse_lgb_tree(
+            node["right_child"], depth + 1, leaf_counter, feature_names
+        )
         splits.extend(left_splits)
         splits.extend(right_splits)
         leaves.extend(left_leaves)
