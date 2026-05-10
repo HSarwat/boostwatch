@@ -88,7 +88,6 @@ img {
 
 
 def _fig_to_base64(fig: plt.Figure) -> str:
-    """Render a Figure to a base64-encoded PNG string and close the figure."""
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
     buf.seek(0)
@@ -152,6 +151,8 @@ def generate_report(
     if include is None:
         include = list(_DEFAULT_INCLUDE)
     include_set = set(include)
+
+    plt.ioff()
 
     names = _resolve_feature_names(logs, feature_names)
     framework = _get_framework(logs) or "unknown"

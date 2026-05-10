@@ -83,6 +83,10 @@ class BaseObserver(ABC):
         return compute_tree_stats(self.logs)
 
     def plot_summary(self) -> None:
-        """Display a multi-panel summary figure for the training run."""
+        """Create a multi-panel summary figure for the training run.
+
+        The figure is created but not displayed — call ``plt.show()`` to
+        display all pending figures at once.
+        """
         from ..viz.plotting import plot_summary
         plot_summary(self.logs, self.feature_names)
