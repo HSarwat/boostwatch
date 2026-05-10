@@ -54,9 +54,11 @@ def plot_feature_heatmap(
     logs: List[Any],
     top_k: int = 15,
     features: Optional[List] = None,
-    metric: str = "gain_share",
     smoothing_window: int = 10,
     cmap: str = "YlOrRd",
     figsize: tuple = (14, 8),
+    alpha_floor: float = 0.15,
 ) -> None:
-    _charts.plot_feature_heatmap(logs, top_k, features, metric, smoothing_window, cmap, figsize)
+    _charts.plot_feature_heatmap(
+        logs, top_k, features, smoothing_window, cmap, figsize, alpha_floor
+    )

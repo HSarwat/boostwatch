@@ -288,14 +288,22 @@ def plot_feature_heatmap(
     logs: List[Any],
     top_k: int = 15,
     features: Optional[List] = None,
-    metric: str = "gain_share",
     smoothing_window: int = 10,
-    cmap: str = "YlOrRd",
+    cmap: str = "viridis",
     figsize: tuple = (14, 8),
+    alpha_floor: float = 0.10,
 ) -> plt.Figure:
-    """Return a Figure with a feature x iteration heatmap of training dynamics."""
+    """Return a Figure with a bivariate feature x iteration heatmap.
+
+    Each cell encodes two metrics simultaneously:
+      * **Color hue** — feature's *gain share* of the iteration (normalized).
+      * **Cell alpha** — feature's *split count* in the iteration (normalized).
+
+    A faded cell means "rarely picked", a vivid cell means "picked often";
+    color tells you whether those splits actually moved the loss.
+    """
     import pandas as pd
-    from matplotlib import gridspec
+    from matplotlib import gridspec, cm, colors as mcolors
 
     if not logs:
         fig, ax = plt.subplots(figsize=(8, 3))
@@ -348,7 +356,8 @@ def plot_feature_heatmap(
     n_selected = len(selected)
     selected_set = set(selected)
 
-    matrix = np.zeros((n_selected, n_iters))
+    gain_share = np.zeros((n_selected, n_iters))
+    count_mat = np.zeros((n_selected, n_iters))
     total_gain_per_iter = np.zeros(n_iters)
     iter_numbers: List[int] = []
 
@@ -367,34 +376,58 @@ def plot_feature_heatmap(
                 feat_count[f] = feat_count.get(f, 0) + 1
         total_gain_per_iter[col] = iter_total
         for row, f in enumerate(selected):
-            if metric == "gain_share":
-                matrix[row, col] = feat_gain.get(f, 0.0) / iter_total if iter_total > 0 else 0.0
-            elif metric == "count":
-                matrix[row, col] = float(feat_count.get(f, 0))
-            else:
-                matrix[row, col] = feat_gain.get(f, 0.0)
+            gain_share[row, col] = (
+                feat_gain.get(f, 0.0) / iter_total if iter_total > 0 else 0.0
+            )
+            count_mat[row, col] = float(feat_count.get(f, 0))
 
     if smoothing_window > 1 and n_iters >= smoothing_window:
         for row in range(n_selected):
-            matrix[row] = (
-                pd.Series(matrix[row])
+            gain_share[row] = (
+                pd.Series(gain_share[row])
                 .rolling(smoothing_window, min_periods=1, center=True)
                 .mean()
                 .to_numpy()
             )
+            count_mat[row] = (
+                pd.Series(count_mat[row])
+                .rolling(smoothing_window, min_periods=1, center=True)
+                .mean()
+                .to_numpy()
+            )
+
+    gain_max = gain_share.max() if gain_share.max() > 0 else 1.0
+    count_max = count_mat.max() if count_mat.max() > 0 else 1.0
+    gain_norm = gain_share / gain_max
+    count_norm = count_mat / count_max
+
+    cmap_obj = cm.get_cmap(cmap)
+    rgba = cmap_obj(gain_norm)
+    alpha = alpha_floor + (1.0 - alpha_floor) * count_norm
+    alpha[count_mat == 0] = 0.0
+    rgba[..., 3] = alpha
 
     feat_labels = [names_map.get(f, "feat_{}".format(f)) for f in selected]
     tick_step = max(1, n_iters // 10)
     tick_positions = list(range(0, n_iters, tick_step))
     tick_labels = [str(iter_numbers[i]) for i in tick_positions]
 
-    metric_labels = {"gain_share": "Gain Share", "count": "Split Count", "raw_gain": "Total Gain"}
-    metric_label = metric_labels.get(metric, metric)
-
     fig = plt.figure(figsize=figsize, layout="constrained")
-    gs = gridspec.GridSpec(2, 1, height_ratios=[1, 5], hspace=0.06, figure=fig)
-    ax_curve = fig.add_subplot(gs[0])
-    ax_heat = fig.add_subplot(gs[1])
+    gs = gridspec.GridSpec(
+        2, 2,
+        height_ratios=[1, 5],
+        width_ratios=[8, 1],
+        hspace=0.06, wspace=0.04,
+        figure=fig,
+    )
+    ax_curve = fig.add_subplot(gs[0, 0])
+    ax_heat = fig.add_subplot(gs[1, 0])
+
+    # Right column: stack a square 2D bivariate legend in the middle, blank above/below.
+    legend_gs = gs[:, 1].subgridspec(3, 1, height_ratios=[1, 2, 4], hspace=0.0)
+    fig.add_subplot(legend_gs[0]).axis("off")
+    ax_legend = fig.add_subplot(legend_gs[1])
+    fig.add_subplot(legend_gs[2]).axis("off")
 
     ax_curve.fill_between(range(n_iters), total_gain_per_iter, alpha=0.25, color="steelblue")
     ax_curve.plot(range(n_iters), total_gain_per_iter, color="steelblue", linewidth=1.2)
@@ -404,17 +437,31 @@ def plot_feature_heatmap(
     ax_curve.tick_params(axis="y", labelsize=7)
     ax_curve.grid(True, alpha=0.2)
 
-    im = ax_heat.imshow(matrix, aspect="auto", cmap=cmap, interpolation="nearest", vmin=0)
+    ax_heat.imshow(rgba, aspect="auto", interpolation="nearest")
     ax_heat.set_yticks(range(n_selected))
     ax_heat.set_yticklabels(feat_labels, fontsize=9)
     ax_heat.set_xticks(tick_positions)
     ax_heat.set_xticklabels(tick_labels, fontsize=8)
     ax_heat.set_xlabel("Iteration", fontsize=10)
 
-    cbar = plt.colorbar(im, ax=ax_heat, shrink=0.7, pad=0.02)
-    cbar.set_label(metric_label, fontsize=9)
+    # Bivariate 2D legend: hue along x (gain share), alpha along y (splits / iter).
+    legend_res = 96
+    GX, CY = np.meshgrid(np.linspace(0, 1, legend_res), np.linspace(0, 1, legend_res))
+    legend_rgba = cmap_obj(GX)
+    legend_rgba[..., 3] = alpha_floor + (1.0 - alpha_floor) * CY
+    ax_legend.imshow(legend_rgba, origin="lower", extent=(0, 1, 0, 1), aspect="equal")
+    ax_legend.set_xticks([0, 1])
+    ax_legend.set_xticklabels(["0", "{:g}".format(round(gain_max, 2))], fontsize=7)
+    ax_legend.set_yticks([0, 1])
+    ax_legend.set_yticklabels(["0", "{:g}".format(round(count_max, 2))], fontsize=7)
+    ax_legend.tick_params(length=2, pad=2)
+    ax_legend.set_xlabel("gain share", fontsize=8, labelpad=2)
+    ax_legend.set_ylabel("splits / iter", fontsize=8, labelpad=2)
+    for spine in ax_legend.spines.values():
+        spine.set_linewidth(0.5)
+        spine.set_color("#666")
 
-    title = "Feature {} over Training".format(metric_label)
+    title = "Feature Gain Share × Split Count over Training"
     if smoothing_window > 1:
         title += "  (smoothing={})".format(smoothing_window)
     fig.suptitle(title, fontsize=12, fontweight="bold")

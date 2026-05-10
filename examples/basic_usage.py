@@ -72,6 +72,8 @@ def example_lightgbm_report():
 def example_sklearn_interactive():
     from sklearn.ensemble import GradientBoostingClassifier
 
+    from matplotlib import cm
+
     from boostwatch.viz.data_export import (
         get_tree_stats,
         get_feature_stats,
@@ -91,7 +93,6 @@ def example_sklearn_interactive():
         len(logs), accuracy_score(y_test, preds)
     ))
 
-    # --- Derive training-internal signals from the logs ---
     iterations = [log.iteration for log in logs]
     iter_total_gain = []
     for log in logs:
@@ -102,19 +103,31 @@ def example_sklearn_interactive():
     depth_dist = get_split_depth_distribution(logs)
     top_feats = get_feature_stats(logs, feature_names).head(5)
 
-    # Per-iteration gain share for the top features
+    # Build per-iteration gain-share + split-count matrices for the top features
     top_idx = top_feats["feature_index"].tolist()
     top_names = top_feats["name"].tolist()
-    gain_share = np.zeros((len(top_idx), len(logs)))
+    n_top, n_iters = len(top_idx), len(logs)
+    gain_share = np.zeros((n_top, n_iters))
+    count_mat = np.zeros((n_top, n_iters))
     for j, log in enumerate(logs):
         _, splits = _iter_log(log)
         col_total = sum(_split_gain(s) for s in splits) or 1.0
         for s in splits:
             fidx = _split_feature(s)
             if fidx in top_idx:
-                gain_share[top_idx.index(fidx), j] += _split_gain(s) / col_total
+                row = top_idx.index(fidx)
+                gain_share[row, j] += _split_gain(s) / col_total
+                count_mat[row, j] += 1
 
-    # --- Dashboard ---
+    # Bivariate encoding: hue = gain share, alpha = split count
+    cmap_obj = cm.get_cmap("viridis")
+    g_max = gain_share.max() or 1.0
+    c_max = count_mat.max() or 1.0
+    rgba = cmap_obj(gain_share / g_max)
+    alpha_floor = 0.10
+    rgba[..., 3] = alpha_floor + (1.0 - alpha_floor) * (count_mat / c_max)
+    rgba[count_mat == 0, 3] = 0.0
+
     fig, axes = plt.subplots(2, 2, figsize=(14, 9))
     fig.suptitle("Boostwatch — sklearn GBT Training Internals",
                  fontsize=14, fontweight="bold")
@@ -136,13 +149,12 @@ def example_sklearn_interactive():
     ax.set_title("Tree Complexity Drift"); ax.grid(True, alpha=0.3)
 
     ax = axes[1, 0]
-    im = ax.imshow(gain_share, aspect="auto", cmap="YlOrRd",
-                   extent=(iterations[0], iterations[-1], len(top_names), 0))
-    ax.set_yticks(np.arange(len(top_names)) + 0.5)
+    ax.imshow(rgba, aspect="auto", interpolation="nearest",
+              extent=(iterations[0], iterations[-1], n_top, 0))
+    ax.set_yticks(np.arange(n_top) + 0.5)
     ax.set_yticklabels(top_names)
     ax.set_xlabel("Iteration")
-    ax.set_title("Feature Gain Share Over Iterations (top 5)")
-    fig.colorbar(im, ax=ax, label="Gain share")
+    ax.set_title("Top 5 Features — Gain Share (hue) × Split Count (opacity)")
 
     ax = axes[1, 1]
     ax.bar(depth_dist["depth"], depth_dist["split_count"], color="#4a90d9", edgecolor="white")
